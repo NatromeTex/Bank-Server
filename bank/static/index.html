@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank Analytics Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        /* Simple style for status pills */
+        .status-pill {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        /* Dark theme status colors */
+        .status-completed {
+            background-color: #064e3b;
+            color: #6ee7b7;
+        }
+
+        .status-pending {
+            background-color: #78350f;
+            color: #fcd34d;
+        }
+
+        .status-failed {
+            background-color: #7f1d1d;
+            color: #fca5a5;
+        }
+
+        /* WebSocket status dot */
+        .ws-dot {
+            height: 0.75rem;
+            width: 0.75rem;
+            border-radius: 9999px;
+            display: inline-block;
+        }
+    </style>
+</head>
+
+<body class="bg-[#060606] text-[#A0A0A0] font-sans leading-normal tracking-normal p-6">
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
+
+        <!-- Header -->
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-3xl font-bold text-gray-100">Bank Analytics Dashboard</h1>
+            <div class="flex items-center space-x-4">
+                <a href="/security.html"
+                    class="text-sm bg-red-900 text-red-100 px-3 py-1 rounded hover:bg-red-800 transition-colors">Security
+                    Dashboard</a>
+                <!-- WebSocket Status Indicator -->
+                <div class="flex items-center space-x-2">
+                    <div id="ws-status-dot" class="ws-dot bg-gray-600" title="WebSocket Disconnected"></div>
+                    <span id="ws-status-text" class="text-sm text-gray-400">Connecting...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <!-- Total Funds -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Total Funds</h2>
+                <p id="total-funds" class="text-3xl font-bold text-white mt-2">...</p>
+            </div>
+            <!-- Total Accounts -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Total Accounts</h2>
+                <p id="total-accounts" class="text-3xl font-bold text-white mt-2">...</p>
+            </div>
+            <!-- Avg Latency -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Avg Latency (30s)</h2>
+                <p id="avg-latency" class="text-3xl font-bold text-white mt-2">...</p>
+            </div>
+            <!-- TXN per Minute -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">TPM (10s avg)</h2>
+                <p id="tpm" class="text-3xl font-bold text-white mt-2">...</p>
+            </div>
+        </div>
+
+        <!-- Transaction Health (Queue Size Removed) -->
+        <h2 class="text-2xl font-bold text-gray-200 mb-4">Transaction Health</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Completed Transactions</h2>
+                <p id="completed-tx" class="text-3xl font-bold text-green-400 mt-2">...</p>
+            </div>
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Failed Transactions</h2>
+                <p id="failed-tx" class="text-3xl font-bold text-red-400 mt-2">...</p>
+            </div>
+        </div>
+
+        <!-- Charts Section -->
+        <h2 class="text-2xl font-bold text-gray-200 mb-4">Real-time Analytics</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h3 class="text-lg font-semibold mb-4 text-[#A0A0A0]">Transactions Per Minute</h3>
+                <canvas id="tpmChart"></canvas>
+            </div>
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h3 class="text-lg font-semibold mb-4 text-[#A0A0A0]">Latency Trend</h3>
+                <canvas id="latencyChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Last Transactions Table -->
+        <h2 class="text-2xl font-bold text-gray-200 mb-4">Recent Transactions</h2>
+        <div class="bg-[#111111] rounded-lg shadow-md border border-[#222222] overflow-hidden">
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-[#222222]">
+                    <thead class="bg-[#0a0a0a]">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                Status</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                Type</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                Amount</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                From</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                To</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-[#A0A0A0] uppercase tracking-wider">
+                                Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transactions-table-body" class="bg-[#111111] divide-y divide-[#222222]">
+                        <!-- Rows inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Charts Setup
+        const tpmCtx = document.getElementById('tpmChart').getContext('2d');
+        const latencyCtx = document.getElementById('latencyChart').getContext('2d');
+
+        function createGradient(ctx, colorStart) {
+            const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+            gradient.addColorStop(0, colorStart);
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            return gradient;
+        }
+
+        // Light Blue for TPM (sky-400)
+        const tpmColor = 'rgba(56, 189, 248, 1)';
+        const tpmGradient = createGradient(tpmCtx, 'rgba(56, 189, 248, 0.5)');
+
+        // Lightish Green for Latency (green-400)
+        const latencyColor = 'rgba(74, 222, 128, 1)';
+        const latencyGradient = createGradient(latencyCtx, 'rgba(74, 222, 128, 0.5)');
+
+        const chartConfig = {
+            type: 'line',
+            options: {
+                responsive: true,
+                animation: { duration: 500 },
+                scales: {
+                    x: { display: false },
+                    y: { beginAtZero: true, grid: { color: '#222222' }, ticks: { color: '#A0A0A0' } }
+                },
+                plugins: { legend: { display: false } },
+                elements: {
+                    point: { radius: 0, hitRadius: 10, hoverRadius: 0 }
+                }
+            }
+        };
+
+        const tpmChart = new Chart(tpmCtx, {
+            ...chartConfig,
+            data: {
+                labels: Array(20).fill(''),
+                datasets: [{
+                    label: 'TPM',
+                    data: Array(20).fill(0),
+                    borderColor: tpmColor,
+                    backgroundColor: tpmGradient,
+                    fill: true,
+                    tension: 0.4
+                }]
+            }
+        });
+
+        const latencyChart = new Chart(latencyCtx, {
+            ...chartConfig,
+            data: {
+                labels: Array(20).fill(''),
+                datasets: [{
+                    label: 'Latency',
+                    data: Array(20).fill(0),
+                    borderColor: latencyColor,
+                    backgroundColor: latencyGradient,
+                    fill: true,
+                    tension: 0.4
+                }]
+            }
+        });
+
+        document.addEventListener("DOMContentLoaded", function () {
+
+            const wsStatusDot = document.getElementById("ws-status-dot");
+            const wsStatusText = document.getElementById("ws-status-text");
+
+            const totalFundsEl = document.getElementById("total-funds");
+            const totalAccountsEl = document.getElementById("total-accounts");
+            const avgLatencyEl = document.getElementById("avg-latency");
+            const tpmEl = document.getElementById("tpm");
+            const completedTxEl = document.getElementById("completed-tx");
+            const failedTxEl = document.getElementById("failed-tx");
+            const tableBodyEl = document.getElementById("transactions-table-body");
+
+            function connect() {
+                const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+                const wsUrl = `${protocol}//${window.location.host}/ws/stats`;
+                const ws = new WebSocket(wsUrl);
+
+                ws.onopen = function (event) {
+                    console.log("WebSocket connected.");
+                    wsStatusDot.className = "ws-dot bg-green-500";
+                    wsStatusText.innerText = "Connected";
+                    wsStatusText.classList.remove("text-gray-400");
+                    wsStatusText.classList.add("text-green-400");
+                };
+
+                ws.onmessage = function (event) {
+                    const data = JSON.parse(event.data);
+
+                    totalFundsEl.innerText = `$${data.total_funds.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                    totalAccountsEl.innerText = data.account_count;
+                    avgLatencyEl.innerHTML = `${data.avg_latency.toFixed(4)} <span class="text-lg font-normal text-[#666666]">sec</span>`;
+                    tpmEl.innerText = data.tpm.toFixed(1);
+                    completedTxEl.innerText = data.completed_count;
+                    failedTxEl.innerText = data.failed_count;
+
+                    updateChart(tpmChart, data.tpm);
+                    updateChart(latencyChart, data.avg_latency);
+
+                    updateTransactionsTable(data.last_50_transactions);
+                };
+
+                ws.onclose = function (event) {
+                    console.log("WebSocket disconnected. Reconnecting in 2s...");
+                    wsStatusDot.className = "ws-dot bg-red-500";
+                    wsStatusText.innerText = "Reconnecting...";
+                    wsStatusText.classList.remove("text-green-400");
+                    wsStatusText.classList.add("text-gray-400");
+                    setTimeout(connect, 2000);
+                };
+            }
+
+            function updateChart(chart, value) {
+                const data = chart.data.datasets[0].data;
+                data.shift();
+                data.push(value);
+                chart.update('none');
+            }
+
+            function updateTransactionsTable(transactions) {
+                tableBodyEl.innerHTML = "";
+
+                if (!transactions || transactions.length === 0) {
+                    tableBodyEl.innerHTML = `<tr><td colspan="6" class="px-6 py-4 text-center text-[#666666]">No transactions found.</td></tr>`;
+                    return;
+                }
+
+                transactions.forEach(tx => {
+                    let statusPill;
+                    if (tx.status === 'completed') {
+                        statusPill = `<span class="status-pill status-completed">Completed</span>`;
+                    } else if (tx.status === 'failed') {
+                        statusPill = `<span class="status-pill status-failed">Failed</span>`;
+                    } else {
+                        statusPill = `<span class="status-pill status-pending">Pending</span>`;
+                    }
+
+                    const amount = parseFloat(tx.amount).toFixed(2);
+                    const createdDate = new Date(tx.timestamp).toLocaleTimeString();
+
+                    const row = `
+                        <tr>
+                            <td class="px-6 py-4 whitespace-nowrap">${statusPill}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-[#A0A0A0]">${tx.type}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-white">$${amount}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-[#666666] font-mono">${tx.from || '-'}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-[#666666] font-mono">${tx.to || '-'}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-[#666666]">${createdDate}</td>
+                        </tr>
+                    `;
+                    tableBodyEl.innerHTML += row;
+                });
+            }
+
+            connect();
+        });
+    </script>
+</body>
+
+</html>

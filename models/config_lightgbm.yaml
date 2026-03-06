@@ -1,0 +1,11 @@
+train_data_path: "data/train_net.csv"
+test_data_path: "data/valid_net.csv"
+dev_mode: True
+output_dir: "models/artifacts_lightgbm"
+lgbm_params:
+  n_estimators: 100
+  learning_rate: 0.0001
+  num_leaves: 31
+  objective: "multiclass"
+  metric: "multi_logloss"
+  class_weight: "balanced"

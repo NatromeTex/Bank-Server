@@ -1,0 +1,7 @@
+train_data_path: "data/train_net.csv"
+test_data_path: "data/valid_net.csv"
+dev_mode: True
+pca_components: 10
+svc_kernel: "rbf"
+svc_C: 1.0
+output_dir: "models/artifacts"

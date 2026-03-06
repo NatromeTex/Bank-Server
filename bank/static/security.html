@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank Security Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .status-pill {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-critical {
+            background-color: #7f1d1d;
+            color: #fca5a5;
+        }
+
+        .status-warning {
+            background-color: #78350f;
+            color: #fcd34d;
+        }
+
+        .status-safe {
+            background-color: #064e3b;
+            color: #6ee7b7;
+        }
+
+        .ws-dot {
+            height: 0.75rem;
+            width: 0.75rem;
+            border-radius: 9999px;
+            display: inline-block;
+        }
+
+        /* Scrollbar for logs */
+        #alert-feed::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        #alert-feed::-webkit-scrollbar-track {
+            background: #111;
+        }
+
+        #alert-feed::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 4px;
+        }
+
+        #alert-feed::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+
+<body class="bg-[#060606] text-[#A0A0A0] font-sans leading-normal tracking-normal p-6">
+
+    <div class="container mx-auto p-4 md:p-8 max-w-7xl">
+
+        <!-- Header -->
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-3xl font-bold text-red-500">Security Operations Center</h1>
+            <div class="flex items-center space-x-4">
+                <a href="/" class="text-sm text-[#A0A0A0] hover:text-white transition-colors">Back to Home</a>
+                <!-- WebSocket Status -->
+                <div class="flex items-center space-x-2">
+                    <div id="ws-status-dot" class="ws-dot bg-gray-600" title="WebSocket Disconnected"></div>
+                    <span id="ws-status-text" class="text-sm text-gray-400">Connecting...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Metrics Row -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <!-- Active Threads (Worker) -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">System Status</h2>
+                <div class="flex items-center mt-2">
+                    <span class="status-pill status-safe mr-2">Operational</span>
+                    <span class="text-xs text-[#666666]">Worker Active</span>
+                </div>
+            </div>
+            <!-- Threat Level (Placeholder really, but dynamic via JS) -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Threat Level</h2>
+                <p id="threat-level" class="text-3xl font-bold text-green-500 mt-2">LOW</p>
+            </div>
+            <!-- Alerts Count -->
+            <div class="bg-[#111111] p-6 rounded-lg shadow-md border border-[#222222]">
+                <h2 class="text-sm font-medium text-[#A0A0A0] uppercase">Alerts (Session)</h2>
+                <p id="alert-count" class="text-3xl font-bold text-white mt-2">0</p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+            <!-- Live Feed -->
+            <div
+                class="lg:col-span-2 bg-[#111111] rounded-lg shadow-md border border-[#222222] flex flex-col h-[600px]">
+                <div class="p-4 border-b border-[#222222] flex justify-between items-center">
+                    <h2 class="text-lg font-bold text-gray-200">Live Threat Intelligence</h2>
+                    <span class="text-xs text-[#666666]">Real-time (WebSocket)</span>
+                </div>
+                <div id="alert-feed" class="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-sm">
+                    <!-- Alerts injected here -->
+                    <div class="text-[#666666] italic text-center mt-10">Waiting for intelligence stream...</div>
+                </div>
+            </div>
+
+            <!-- Stats/Graphs Integration -->
+            <div class="space-y-6">
+                <!-- TPM Chart (Mini) -->
+                <div class="bg-[#111111] p-4 rounded-lg shadow-md border border-[#222222]">
+                    <h3 class="text-sm font-semibold mb-4 text-[#A0A0A0]">Traffic Volume (TPM)</h3>
+                    <canvas id="tpmChart"></canvas>
+                </div>
+
+                <!-- Latest Attack Details -->
+                <div class="bg-[#111111] p-4 rounded-lg shadow-md border border-[#222222] h-[300px] overflow-hidden">
+                    <h3 class="text-sm font-semibold mb-2 text-[#A0A0A0]">Latest Incident Details</h3>
+                    <pre id="incident-details" class="text-xs text-red-300 overflow-auto h-full pb-8">None</pre>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // Charts Setup (Reusing TPM logic)
+        const tpmCtx = document.getElementById('tpmChart').getContext('2d');
+        const tpmChart = new Chart(tpmCtx, {
+            type: 'line',
+            options: {
+                responsive: true,
+                animation: { duration: 0 }, // Disable animation for performance
+                scales: {
+                    x: { display: false },
+                    y: { beginAtZero: true, grid: { color: '#222222' }, ticks: { color: '#666' } }
+                },
+                plugins: { legend: { display: false } },
+                elements: { point: { radius: 0 } }
+            },
+            data: {
+                labels: Array(20).fill(''),
+                datasets: [{
+                    data: Array(20).fill(0),
+                    borderColor: 'rgba(56, 189, 248, 1)',
+                    backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                    fill: true,
+                    tension: 0.4
+                }]
+            }
+        });
+
+        const alertFeed = document.getElementById("alert-feed");
+        const incidentDetails = document.getElementById("incident-details");
+        const alertCountEl = document.getElementById("alert-count");
+        const threatLevelEl = document.getElementById("threat-level");
+        const wsStatusDot = document.getElementById("ws-status-dot");
+        const wsStatusText = document.getElementById("ws-status-text");
+
+        let alertCount = 0;
+        let wsConnected = false;
+        let inferenceHealth = false;
+        let threatLevelTimer = null;
+        const MAX_LOGS = 50;
+
+        // Initialize from localStorage
+        function loadPersistedData() {
+            const savedLogs = JSON.parse(localStorage.getItem('securityLogs') || '[]');
+            if (savedLogs.length > 0) {
+                // Clear initial waiting message
+                if (alertFeed.children.length === 1 && alertFeed.children[0].classList.contains('text-center')) {
+                    alertFeed.innerHTML = "";
+                }
+                // Determine alert count based on saved logs (excluding info logs if desired, but simple count is fine)
+                savedLogs.forEach(log => {
+                    renderAlert(log, false); // false = don't save again
+                });
+                alertCount = savedLogs.filter(l => l.type !== 'info').length;
+                alertCountEl.innerText = alertCount;
+            }
+        }
+
+        function renderAlert(alertData, save = true) {
+            // Remove waiting message if exists
+            if (alertFeed.children.length === 1 && alertFeed.children[0].classList.contains('text-center')) {
+                alertFeed.innerHTML = "";
+            }
+
+            let borderClass = "border-gray-500 text-gray-400";
+            if (alertData.type === 'critical') borderClass = "border-red-500 text-red-400";
+            else if (alertData.type === 'warning') borderClass = "border-yellow-500 text-yellow-400";
+            else if (alertData.type === 'info') borderClass = "border-blue-500 text-blue-400";
+
+            const div = document.createElement("div");
+            div.className = "p-3 rounded border-l-2 bg-[#0a0a0a] " + borderClass;
+
+            // Use timestamp from data or current time
+            const time = alertData.timestamp || new Date().toLocaleTimeString();
+            div.innerHTML = `<span class="opacity-50">[${time}]</span> <span class="font-bold">${alertData.alert}</span>`;
+
+            alertFeed.prepend(div);
+
+            // Limit feed size in DOM
+            if (alertFeed.children.length > MAX_LOGS) {
+                alertFeed.lastElementChild.remove();
+            }
+
+            if (alertData.type !== 'info' && save) {
+                alertCount++;
+                alertCountEl.innerText = alertCount;
+            }
+
+            if (alertData.type === 'critical' || (alertData.details && alertData.details.threat_level === 'HIGH')) {
+                setThreatLevel("CRITICAL", "text-red-500");
+                incidentDetails.textContent = JSON.stringify(alertData.details, null, 2);
+            } else if (alertData.type === 'warning' || (alertData.details && alertData.details.threat_level === 'MED')) {
+                setThreatLevel("ELEVATED", "text-yellow-500");
+            }
+
+            if (save) {
+                saveAlert(alertData, time);
+            }
+        }
+
+        function addAlert(alertData) {
+            renderAlert(alertData, true);
+        }
+
+        function saveAlert(alertData, timestamp) {
+            const logs = JSON.parse(localStorage.getItem('securityLogs') || '[]');
+            // Add timestamp to data
+            const newLog = { ...alertData, timestamp: timestamp };
+            logs.unshift(newLog);
+            if (logs.length > MAX_LOGS) {
+                logs.pop();
+            }
+            localStorage.setItem('securityLogs', JSON.stringify(logs));
+        }
+
+        function setThreatLevel(text, colorClass) {
+            threatLevelEl.innerText = text;
+            threatLevelEl.className = "text-3xl font-bold mt-2 " + colorClass;
+
+            // Clear existing timer
+            if (threatLevelTimer) clearTimeout(threatLevelTimer);
+
+            // Set timeout to revert to LOW after 30 seconds
+            threatLevelTimer = setTimeout(() => {
+                threatLevelEl.innerText = "LOW";
+                threatLevelEl.className = "text-3xl font-bold text-green-500 mt-2";
+            }, 30000);
+        }
+
+        async function checkInferenceHealth() {
+            try {
+                const response = await fetch('http://localhost:8001/health');
+                const data = await response.json();
+                inferenceHealth = (data.status === "ok");
+            } catch (e) {
+                inferenceHealth = false;
+            }
+            updateStatus();
+        }
+
+        function updateStatus() {
+            // Green: Connected (8000) AND Inference Health OK (8001)
+            // Blue: Connected (8000) ONLY
+            // Yellow: Inference Health OK (8001) ONLY
+            // Red: Neither connected
+
+            if (wsConnected && inferenceHealth) {
+                wsStatusDot.className = "ws-dot bg-green-500";
+                wsStatusText.innerText = "System Online";
+                wsStatusText.className = "text-sm text-green-400";
+            } else if (wsConnected) {
+                wsStatusDot.className = "ws-dot bg-blue-500";
+                wsStatusText.innerText = "Bank Connected (AI Offline)";
+                wsStatusText.className = "text-sm text-blue-400";
+            } else if (inferenceHealth) {
+                wsStatusDot.className = "ws-dot bg-yellow-500";
+                wsStatusText.innerText = "AI Online (Bank Offline)";
+                wsStatusText.className = "text-sm text-yellow-400";
+            } else {
+                wsStatusDot.className = "ws-dot bg-red-500";
+                wsStatusText.innerText = "Disconnected";
+                wsStatusText.className = "text-sm text-red-400";
+            }
+        }
+
+        function connect() {
+            // 1. Connect to Security WS for Alerts
+            const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+            const wsUrl = `${protocol}//${window.location.host}/ws/security`;
+            const ws = new WebSocket(wsUrl);
+
+            ws.onopen = function () {
+                console.log("Connected to Security WS");
+                wsConnected = true;
+                updateStatus();
+
+                // Show monitoring check immediately if empty
+                if (alertFeed.children.length === 1 && alertFeed.children[0].classList.contains('text-center')) {
+                    alertFeed.children[0].innerText = "Connected. Monitoring network traffic...";
+                }
+            };
+
+            ws.onmessage = function (event) {
+                const data = JSON.parse(event.data);
+                if (data.alert) {
+                    addAlert(data);
+                }
+            };
+
+            ws.onclose = function () {
+                wsConnected = false;
+                updateStatus();
+                setTimeout(connect, 2000);
+            };
+
+            // 2. Connect to Stats WS for Live Metrics
+            const statsUrl = `${protocol}//${window.location.host}/ws/stats`;
+            const wsStats = new WebSocket(statsUrl);
+
+            wsStats.onmessage = function (event) {
+                const data = JSON.parse(event.data);
+                if (data.tpm !== undefined) {
+                    updateChart(tpmChart, data.tpm);
+                }
+            };
+        }
+
+        function updateChart(chart, value) {
+            const data = chart.data.datasets[0].data;
+            data.shift();
+            data.push(value);
+            chart.update('none');
+        }
+
+        connect();
+        loadPersistedData();
+
+        // Poll inference health every 5 seconds
+        setInterval(checkInferenceHealth, 5000);
+        checkInferenceHealth(); // Initial check
+    </script>
+</body>
+
+</html>
