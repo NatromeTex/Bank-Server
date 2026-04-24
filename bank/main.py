@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
@@ -25,19 +25,27 @@ app = FastAPI()
 @app.middleware("http")
 async def netflow_logging_middleware(request: Request, call_next):
     start_time = time.time()
-    
-    # Process request
-    response = await call_next(request)
-    
-    end_time = time.time()
-    
-    # Extract flow data
-    # Check for X-Forwarded-For header to support IP spoofing (for testing/simulation)
+
+    # Extract client IP early (needed for mitigation block check)
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         client_host = forwarded_for.split(",")[0].strip()
     else:
         client_host = request.client.host if request.client else "0.0.0.0"
+
+    # Check mitigation block list (populated by mitigation controller via IPC file)
+    blocked_ips = getattr(app.state, "mitigation_blocked_ips", {})
+    if client_host in blocked_ips:
+        if time.time() < blocked_ips[client_host].get("expiry", 0):
+            return JSONResponse(
+                {"detail": "Blocked by DDoS mitigation"},
+                status_code=429,
+            )
+
+    # Process request
+    response = await call_next(request)
+
+    end_time = time.time()
     client_port = request.client.port if request.client else 0
     server_port = 8000 # Default/Assumed
     
@@ -62,9 +70,24 @@ async def netflow_logging_middleware(request: Request, call_next):
     
     return response
 
+_MITIGATION_IPC = Path("/tmp/mitigation_state.json")
+
+async def _load_mitigation_state():
+    """Reload mitigation enforcement state from IPC file every 5 seconds."""
+    app.state.mitigation_blocked_ips = {}
+    while True:
+        try:
+            if _MITIGATION_IPC.exists():
+                data = json.loads(_MITIGATION_IPC.read_text())
+                app.state.mitigation_blocked_ips = data.get("blocked_ips", {})
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(worker())
+    asyncio.create_task(_load_mitigation_state())
 
 async def process_request(type, data):
     loop = asyncio.get_running_loop()
