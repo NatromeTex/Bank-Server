@@ -240,6 +240,19 @@ class MitigationController:
         else:
             return ActionResult(action, "unknown", "failed", "unknown action type")
 
+    # ── Report file writer ────────────────────────────────────────────────────
+
+    def _save_report(self, report: str, label: str = "report") -> Path:
+        """Write a report to mitigation/reports/YYYYMMDD_HHMMSS_<label>.md"""
+        from datetime import datetime
+        reports_dir = self._project_root / "mitigation" / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = reports_dir / f"{timestamp}_{label}.md"
+        path.write_text(report)
+        self.logger.info("Report saved", path=str(path))
+        return path
+
     # ── LLM agent task ────────────────────────────────────────────────────────
 
     async def _run_agent(self, score: DecisionScore, initial_actions: list[dict]):
@@ -252,6 +265,7 @@ class MitigationController:
         summary = await self.agent.run(score, initial_actions)
         if summary:
             self.logger.incident_report(summary)
+            self._save_report(summary, label="agent_summary")
 
     # ── Janitor: TTL expiry + IPC sync ───────────────────────────────────────
 
@@ -279,6 +293,7 @@ class MitigationController:
         )
         if report:
             self.logger.incident_report(report)
+            self._save_report(report, label="incident_report")
             await self._post_report(report)
 
         # Clear enforcement state and reset trackers
