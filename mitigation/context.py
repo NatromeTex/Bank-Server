@@ -57,12 +57,39 @@ class ContextLayer:
         self._last_window_metrics: dict = {}
 
     def ingest_flow(self, flow: dict):
-        self._aggregator.add_flow(flow)
+        # Adapt CICFlowMeter canonical dict to the schema WindowAggregator expects
+        total_bytes   = flow.get("fwd_bytes",   0) + flow.get("bwd_bytes",   0)
+        total_packets = flow.get("fwd_packets", 0) + flow.get("bwd_packets", 0)
+        duration_s    = flow.get("flow_duration_us", 0) / 1_000_000
+        now           = time.time()
+
+        flags = []
+        if flow.get("syn_flag_count", 0): flags.append("SYN")
+        if flow.get("ack_flag_count", 0): flags.append("ACK")
+        if flow.get("fin_flag_count", 0): flags.append("FIN")
+        if flow.get("rst_flag_count", 0): flags.append("RST")
+        if flow.get("psh_flag_count", 0): flags.append("PSH")
+        if flow.get("urg_flag_count", 0): flags.append("URG")
+
+        adapted = {
+            "srcIP":     flow.get("srcIP",    ""),
+            "dstIP":     flow.get("dstIP",    ""),
+            "srcPort":   flow.get("srcPort",   0),
+            "dstPort":   flow.get("dstPort",   0),
+            "protocol":  flow.get("protocol",  0),
+            "bytes":     total_bytes,
+            "packets":   total_packets,
+            "startTime": now - duration_s,
+            "endTime":   now,
+            "tcp_flags": "-".join(flags),
+        }
+        self._aggregator.add_flow(adapted)
+
         ip = flow.get("srcIP", "")
         if ip:
             if ip not in self._talker_windows:
                 self._talker_windows[ip] = deque()
-            self._talker_windows[ip].append(time.time())
+            self._talker_windows[ip].append(now)
 
     def ingest_stats(self, stats: dict):
         self._latest_stats = stats

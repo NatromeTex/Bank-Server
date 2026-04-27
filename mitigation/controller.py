@@ -1,5 +1,4 @@
 import asyncio
-import csv
 import json
 import time
 from pathlib import Path
@@ -16,15 +15,6 @@ from mitigation.ipc import IPCBridge
 from mitigation.llm_agent import LLMAgent
 from mitigation.logger import StructuredLogger
 
-
-_CSV_FIELDNAMES = [
-    'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 'IPV4_DST_ADDR',
-    'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 'PROTOCOL', 'TCP_FLAGS',
-    'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN',
-    'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP',
-    'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES',
-    'IN_PKTS', 'OUT_BYTES', 'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ANOMALY', 'ID', 'ALERT',
-]
 
 
 class MitigationController:
@@ -115,48 +105,36 @@ class MitigationController:
             try:
                 if self._data_dir.exists():
                     files = sorted(
-                        self._data_dir.rglob("*.csv"),
+                        self._data_dir.rglob("*.jsonl"),
                         key=lambda p: p.stat().st_mtime,
                     )
                     for fp in files:
                         key = str(fp)
                         offset = self._csv_offsets.get(key, 0)
                         if fp.stat().st_size > offset:
-                            new_offset = await asyncio.to_thread(self._read_csv_flows, fp, offset)
+                            new_offset = await asyncio.to_thread(self._read_jsonl_flows, fp, offset)
                             self._csv_offsets[key] = new_offset
             except Exception as e:
                 self.logger.error("flow_file_watcher", str(e))
             await asyncio.sleep(self.config.flow_watcher_interval_secs)
 
-    def _read_csv_flows(self, fp: Path, offset: int) -> int:
+    def _read_jsonl_flows(self, fp: Path, offset: int) -> int:
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 f.seek(offset)
-                if offset == 0:
-                    f.readline()  # skip header
-                reader = csv.DictReader(f, fieldnames=_CSV_FIELDNAMES)
-                for row in reader:
-                    src_ip = row.get("IPV4_SRC_ADDR", "")
-                    if not src_ip:
+                for line in f:
+                    line = line.strip()
+                    if not line:
                         continue
                     try:
-                        self.context.ingest_flow({
-                            "srcIP": src_ip,
-                            "dstIP": row.get("IPV4_DST_ADDR", ""),
-                            "srcPort": int(row.get("L4_SRC_PORT", 0) or 0),
-                            "dstPort": int(row.get("L4_DST_PORT", 0) or 0),
-                            "protocol": int(row.get("PROTOCOL", 0) or 0),
-                            "bytes": int(row.get("IN_BYTES", 0) or 0),
-                            "packets": int(row.get("IN_PKTS", 0) or 0),
-                            "startTime": float(row.get("FIRST_SWITCHED", 0) or 0),
-                            "endTime": float(row.get("LAST_SWITCHED", 0) or 0),
-                            "tcp_flags": row.get("TCP_FLAGS", ""),
-                        })
+                        flow = json.loads(line)
+                        if flow.get("srcIP"):
+                            self.context.ingest_flow(flow)
                     except Exception:
                         pass
                 return f.tell()
         except Exception as e:
-            self.logger.error("read_csv_flows", str(e))
+            self.logger.error("read_jsonl_flows", str(e))
             return offset
 
     # ── Main evaluation loop ──────────────────────────────────────────────────

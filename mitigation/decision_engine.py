@@ -1,7 +1,11 @@
+import math
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 
 from mitigation.fsm import State
+
+BASELINE_REQ_RATE: float = 50.0
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
@@ -13,6 +17,26 @@ def _sigmoid_clamp(x: float, low: float, high: float) -> float:
     if high <= low:
         return 0.0
     return _clamp((x - low) / (high - low), 0.0, 1.0)
+
+
+class RiskTier(Enum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+
+
+def compute_risk_score(p_attack: float, req_rate: float, baseline_rate: float = BASELINE_REQ_RATE) -> float:
+    """Weighted risk: 60% ML attack probability + 40% log-scaled traffic intensity vs baseline."""
+    rate_component = math.log(1 + req_rate) / math.log(1 + baseline_rate)
+    return min(0.6 * p_attack + 0.4 * rate_component, 1.0)
+
+
+def _classify_risk(risk_score: float) -> RiskTier:
+    if risk_score >= 0.70:
+        return RiskTier.HIGH
+    if risk_score >= 0.35:
+        return RiskTier.MODERATE
+    return RiskTier.LOW
 
 
 @dataclass
@@ -44,11 +68,17 @@ class DecisionScore:
         }
 
 
+_RISK_EMA_ALPHA: float = 0.7
+_HIGH_RISK_CONSECUTIVE_REQUIRED: int = 3
+
+
 class DecisionEngine:
     def __init__(self, config, context, logger):
         self.config = config
         self.context = context
         self.logger = logger
+        self._smoothed_risks: dict[str, float] = {}   # ip → EMA-smoothed risk score
+        self._high_risk_counts: dict[str, int] = {}   # ip → consecutive HIGH evaluations
 
     def evaluate(self) -> DecisionScore:
         c = self.config
@@ -59,12 +89,24 @@ class DecisionEngine:
         recent_alerts = ctx.get_recent_alerts(c.ml_confidence_window_secs)
         baseline = ctx.baseline
 
-        # ── ML confidence from alert frequency ────────────────────────────────
+        # ── ML confidence from per-alert risk scores ──────────────────────────
         critical_alerts = [a for a in recent_alerts if a.get("type") == "critical"]
-        ml_confidence = min(len(critical_alerts) / c.ml_confidence_saturation_count, 1.0)
-        # Floor at 0.65 when an explicit DDoS detection is present
-        if any("Attack Detected" in a.get("alert", "") for a in critical_alerts):
-            ml_confidence = max(ml_confidence, 0.65)
+        alert_risks = []
+        for a in critical_alerts:
+            details = a.get("details", {})
+            p_atk = float(details.get("p_attack", 0.0))
+            r_rate = float(details.get("req_rate", 0.0))
+            alert_risks.append(compute_risk_score(p_atk, r_rate))
+
+        if alert_risks:
+            peak = max(alert_risks)
+            mean = sum(alert_risks) / len(alert_risks)
+            ml_confidence = peak * 0.7 + mean * 0.3
+            # Floor at 0.65 when an explicit DDoS detection is present
+            if any("Attack Detected" in a.get("alert", "") for a in critical_alerts):
+                ml_confidence = max(ml_confidence, 0.65)
+        else:
+            ml_confidence = 0.0
 
         # ── Traffic volume signal [0..1] ──────────────────────────────────────
         fps = window.get("flows_per_second", 0.0)
@@ -123,30 +165,50 @@ class DecisionEngine:
         c = self.config
         actions = []
         whitelist = set(c.ip_whitelist)
-        talkers = score.top_talkers
 
-        if state == State.SUSPICIOUS:
-            for ip, rps in talkers[:5]:
-                if ip not in whitelist and rps > 0:
-                    actions.append({"action": "rate_limit", "ip": ip, "rps_cap": c.rate_limit_rps_suspicious})
+        # ── Per-IP risk-tiered decisions from recent ML alert data ────────────
+        recent_alerts = self.context.get_recent_alerts(c.ml_confidence_window_secs)
+        for a in recent_alerts:
+            if a.get("type") != "critical":
+                continue
+            details = a.get("details", {})
+            src_ip = details.get("srcIP", "")
+            if not src_ip or src_ip in whitelist:
+                continue
+            p_atk = float(details.get("p_attack", 0.0))
+            r_rate = float(details.get("req_rate", 0.0))
+            current_risk = compute_risk_score(p_atk, r_rate)
+            prev = self._smoothed_risks.get(src_ip, current_risk)
+            self._smoothed_risks[src_ip] = _RISK_EMA_ALPHA * current_risk + (1 - _RISK_EMA_ALPHA) * prev
 
-        elif state in (State.UNDER_ATTACK, State.MITIGATING):
-            # SYN flood protection
+        for ip, risk in self._smoothed_risks.items():
+            tier = _classify_risk(risk)
+            if tier == RiskTier.HIGH:
+                self._high_risk_counts[ip] = self._high_risk_counts.get(ip, 0) + 1
+            else:
+                self._high_risk_counts[ip] = 0
+
+            count = self._high_risk_counts.get(ip, 0)
+
+            if tier == RiskTier.LOW:
+                self.logger.risk_decision(ip, risk, tier.value, "allow", count)
+            elif tier == RiskTier.MODERATE:
+                self.logger.risk_decision(ip, risk, tier.value, "rate_limit", count)
+                actions.append({"action": "rate_limit", "ip": ip, "rps_cap": c.rate_limit_rps_suspicious})
+            else:
+                if count >= _HIGH_RISK_CONSECUTIVE_REQUIRED:
+                    self.logger.risk_decision(ip, risk, tier.value, "block_ip", count)
+                    actions.append({"action": "block_ip", "ip": ip, "ttl": c.block_ttl_seconds})
+                else:
+                    # HIGH but not yet sustained — rate-limit as intermediate response
+                    self.logger.risk_decision(ip, risk, tier.value, "rate_limit_pending_block", count)
+                    actions.append({"action": "rate_limit", "ip": ip, "rps_cap": c.rate_limit_rps_attack})
+
+        # ── State-level global mitigations ────────────────────────────────────
+        if state in (State.UNDER_ATTACK, State.MITIGATING):
             if score.syn_ratio > 0.7:
                 actions.append({"action": "enable_syn_cookies"})
-
-            # Traffic shaping on heavy load
             if score.composite > 0.70:
                 actions.append({"action": "shape_traffic", "delay_ms": c.traffic_shape_delay_ms})
-
-            # Block top attackers
-            for ip, rps in talkers[:3]:
-                if ip not in whitelist:
-                    actions.append({"action": "block_ip", "ip": ip, "ttl": c.block_ttl_seconds})
-
-            # Rate-limit the next tier of talkers
-            for ip, rps in talkers[3:8]:
-                if ip not in whitelist:
-                    actions.append({"action": "rate_limit", "ip": ip, "rps_cap": c.rate_limit_rps_attack})
 
         return actions

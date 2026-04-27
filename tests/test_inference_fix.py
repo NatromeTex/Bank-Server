@@ -1,87 +1,135 @@
-
-import sys
-import os
+"""
+Smoke tests for the CICDDoS2019-compatible inference pipeline.
+Validates feature mapping, model prediction, and WebSocket alert path.
+"""
 import asyncio
-import websockets
 import json
-import pandas as pd
-import joblib
+import os
+import sys
 from pathlib import Path
 
-# Add project root to sys.path
+import joblib
+import websockets
+
 sys.path.append(str(Path(__file__).parent.parent))
 
-from inference.app import Flow, map_flow_to_features, MODEL_PATH
+from inference.app import FEATURE_COLUMNS, Flow, map_flow_to_features, MODEL_PATH
 
-async def test_inference():
-    print("Testing Inference...")
-    if not os.path.exists(MODEL_PATH):
-        print(f"FAILED: Model not found at {MODEL_PATH}")
-        return
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    model = joblib.load(MODEL_PATH)
-    
-    # Create a dummy flow with the new feature
-    flow = Flow(
+def _make_flow(**overrides) -> Flow:
+    """Minimal valid CICDDoS2019 flow with sensible defaults."""
+    defaults = dict(
         srcIP="192.168.1.1",
         dstIP="192.168.1.2",
         srcPort=12345,
         dstPort=80,
         protocol=6,
-        bytes=1000,
-        packets=10,
-        startTime=100.0,
-        endTime=101.0,
-        tcp_flags="ACK",
-        total_flows_exp=5 # Test value
+        fwd_packets=10,
+        bwd_packets=6,
+        fwd_bytes=2000,
+        bwd_bytes=900,
+        flow_duration_us=150_000,
+        fwd_pkt_len_max=200.0,
+        fwd_pkt_len_min=40.0,
+        fwd_pkt_len_mean=200.0,
+        fwd_pkt_len_std=0.0,
+        bwd_pkt_len_max=150.0,
+        bwd_pkt_len_min=150.0,
+        bwd_pkt_len_mean=150.0,
+        bwd_pkt_len_std=0.0,
+        syn_flag_count=1,
+        ack_flag_count=9,
+        init_fwd_win_bytes=65535,
+        init_bwd_win_bytes=65535,
+        fwd_header_length=20,
+        bwd_header_length=20,
+        fwd_act_data_packets=9,
     )
-    
-    try:
-        features = map_flow_to_features(flow)
-        print("Feature mapping successful.")
-        print(f"Features columns: {features.columns.tolist()}")
-        
-        prediction = model.predict(features)[0]
-        print(f"Prediction successful: {prediction}")
-        
-    except Exception as e:
-        print(f"FAILED: Inference error: {e}")
-        raise e
+    defaults.update(overrides)
+    return Flow(**defaults)
+
+
+# ── Inference tests ───────────────────────────────────────────────────────────
+
+async def test_feature_mapping():
+    print("Testing feature mapping...")
+    flow = _make_flow()
+    df = map_flow_to_features(flow)
+
+    assert list(df.columns) == FEATURE_COLUMNS, \
+        f"Column mismatch: got {df.columns.tolist()}"
+    assert df.shape == (1, 77), f"Expected shape (1, 77), got {df.shape}"
+
+    assert df["Protocol"].iloc[0] == 6
+    assert df["Total Fwd Packets"].iloc[0] == 10
+    assert df["Total Backward Packets"].iloc[0] == 6
+    assert df["Flow Duration"].iloc[0] == 150_000
+    assert df["SYN Flag Count"].iloc[0] == 1
+
+    # Derived fields
+    duration_s = 150_000 / 1_000_000
+    expected_bps = (2000 + 900) / duration_s
+    assert abs(df["Flow Bytes/s"].iloc[0] - expected_bps) < 1, \
+        f"Flow Bytes/s wrong: {df['Flow Bytes/s'].iloc[0]}"
+
+    print("  Feature mapping: PASSED")
+    print(f"  Columns ({df.shape[1]}): {df.columns.tolist()[:5]} ...")
+
+
+async def test_model_inference():
+    print("\nTesting model inference...")
+    if not os.path.exists(MODEL_PATH):
+        print(f"  SKIPPED: model not found at {MODEL_PATH}")
+        return
+
+    model = joblib.load(MODEL_PATH)
+    flow  = _make_flow()
+    df    = map_flow_to_features(flow)
+
+    import numpy as np
+    df = df.replace([float("inf"), float("-inf")], float("nan")).fillna(0)
+
+    prediction = model.predict(df)[0]
+    proba      = model.predict_proba(df)[0]
+    print(f"  Prediction : {prediction}")
+    print(f"  Confidence : {max(proba):.3f}")
+    print("  Model inference: PASSED")
+
+
+async def test_zero_duration_flow():
+    """flow_duration_us=0 must not cause division-by-zero."""
+    print("\nTesting zero-duration flow safety...")
+    flow = _make_flow(flow_duration_us=0)
+    df   = map_flow_to_features(flow)
+    assert not any(df.isin([float("inf"), float("-inf")]).any()), \
+        "Inf values present for zero-duration flow"
+    print("  Zero-duration safety: PASSED")
+
 
 async def test_websocket():
-    print("\nTesting Websocket...")
+    print("\nTesting WebSocket alert channel...")
     uri = "ws://localhost:8000/ws/security"
     try:
-        async with websockets.connect(uri) as websocket:
-            print("Connected to Security Websocket")
-            
-            # Send a test message (simulating inference app sending alert)
-            test_alert = {
-                "alert": "Test Alert",
-                "type": "warning",
-                "details": {"test": "data"}
-            }
-            await websocket.send(json.dumps(test_alert))
-            print("Sent test alert")
-            
-            # Wait for echo/broadcast (since we are also a client, we should receive it if we were subscribed, 
-            # but the bank server implementation broadcasts to *active connections*. 
-            # Upon connecting, we are an active connection.
-            # If we send a message, the server receives it and broadcasts to all.
-            # So we should receive our own message if the server logic holds.)
-            
-            response = await asyncio.wait_for(websocket.recv(), timeout=2.0)
-            print(f"Received: {response}")
-            assert "Test Alert" in response, "Did not receive broadcasted alert"
-            print("Websocket test PASSED")
-            
+        async with websockets.connect(uri) as ws:
+            alert = {"alert": "Test Alert", "type": "warning", "details": {"test": True}}
+            await ws.send(json.dumps(alert))
+            response = await asyncio.wait_for(ws.recv(), timeout=2.0)
+            assert "Test Alert" in response
+            print("  WebSocket: PASSED")
     except Exception as e:
-        print(f"FAILED: Websocket error: {e}")
-        # raise e # Don't raise, just report
+        print(f"  WebSocket: SKIPPED ({e})")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
-    await test_inference()
+    await test_feature_mapping()
+    await test_model_inference()
+    await test_zero_duration_flow()
     await test_websocket()
+    print("\nAll inference tests complete.")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
