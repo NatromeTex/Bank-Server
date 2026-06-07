@@ -10,148 +10,142 @@ import json
 import sys
 from pathlib import Path
 
-# Add project root to sys.path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Add CORS middleware to allow dashboard polling
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, set to specific origins e.g. ["http://localhost:8000"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load model
-import csv
-
 MODEL_PATH = "models/artifacts/model.joblib"
-DATA_DIR = Path("data/raw/netflow")
-model = None
+DATA_DIR   = Path("data/raw/netflow")
+model      = None
+
+# CICDDoS2019 feature columns — must match training order exactly
+FEATURE_COLUMNS = [
+    "Protocol", "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
+    "Fwd Packets Length Total", "Bwd Packets Length Total",
+    "Fwd Packet Length Max", "Fwd Packet Length Min", "Fwd Packet Length Mean", "Fwd Packet Length Std",
+    "Bwd Packet Length Max", "Bwd Packet Length Min", "Bwd Packet Length Mean", "Bwd Packet Length Std",
+    "Flow Bytes/s", "Flow Packets/s",
+    "Flow IAT Mean", "Flow IAT Std", "Flow IAT Max", "Flow IAT Min",
+    "Fwd IAT Total", "Fwd IAT Mean", "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min",
+    "Bwd IAT Total", "Bwd IAT Mean", "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min",
+    "Fwd PSH Flags", "Bwd PSH Flags", "Fwd URG Flags", "Bwd URG Flags",
+    "Fwd Header Length", "Bwd Header Length",
+    "Fwd Packets/s", "Bwd Packets/s",
+    "Packet Length Min", "Packet Length Max", "Packet Length Mean",
+    "Packet Length Std", "Packet Length Variance",
+    "FIN Flag Count", "SYN Flag Count", "RST Flag Count", "PSH Flag Count",
+    "ACK Flag Count", "URG Flag Count", "CWE Flag Count", "ECE Flag Count",
+    "Down/Up Ratio", "Avg Packet Size", "Avg Fwd Segment Size", "Avg Bwd Segment Size",
+    "Fwd Avg Bytes/Bulk", "Fwd Avg Packets/Bulk", "Fwd Avg Bulk Rate",
+    "Bwd Avg Bytes/Bulk", "Bwd Avg Packets/Bulk", "Bwd Avg Bulk Rate",
+    "Subflow Fwd Packets", "Subflow Fwd Bytes", "Subflow Bwd Packets", "Subflow Bwd Bytes",
+    "Init Fwd Win Bytes", "Init Bwd Win Bytes", "Fwd Act Data Packets", "Fwd Seg Size Min",
+    "Active Mean", "Active Std", "Active Max", "Active Min",
+    "Idle Mean", "Idle Std", "Idle Max", "Idle Min",
+]
+
 
 class Flow(BaseModel):
-    srcIP: str
-    dstIP: str
-    srcPort: int
-    dstPort: int
+    srcIP:    str
+    dstIP:    str
+    srcPort:  int
+    dstPort:  int
     protocol: int
-    bytes: int
-    packets: int
-    startTime: float
-    endTime: float
-    tcp_flags: str
-    total_flows_exp: int # <--- Added missing feature
 
-# Track processed lines for each file
-processed_files = {} # {file_path_str: line_offset}
+    fwd_packets: int
+    bwd_packets: int
+    fwd_bytes:   int
+    bwd_bytes:   int
+    flow_duration_us: int           # microseconds
+
+    fwd_pkt_len_max:  float = 0.0
+    fwd_pkt_len_min:  float = 0.0
+    fwd_pkt_len_mean: float = 0.0
+    fwd_pkt_len_std:  float = 0.0
+    bwd_pkt_len_max:  float = 0.0
+    bwd_pkt_len_min:  float = 0.0
+    bwd_pkt_len_mean: float = 0.0
+    bwd_pkt_len_std:  float = 0.0
+
+    fin_flag_count: int = 0
+    syn_flag_count: int = 0
+    rst_flag_count: int = 0
+    psh_flag_count: int = 0
+    ack_flag_count: int = 0
+    urg_flag_count: int = 0
+    cwe_flag_count: int = 0
+    ece_flag_count: int = 0
+
+    init_fwd_win_bytes:   int = 0
+    init_bwd_win_bytes:   int = 0
+    fwd_header_length:    int = 0
+    bwd_header_length:    int = 0
+    fwd_act_data_packets: int = 0
+
+
+processed_files: dict[str, int] = {}
+
 
 @app.on_event("startup")
 async def startup_event():
     global model
-    # Load model
     if os.path.exists(MODEL_PATH):
         model = joblib.load(MODEL_PATH)
         print(f"Model loaded from {MODEL_PATH}")
     else:
         print(f"Model not found at {MODEL_PATH}")
-        
-    # Send system online alert
+
     await send_alert({
         "alert": "AI Inference Engine Online",
         "type": "info",
-        "details": {"status": "ready", "model": "loaded" if model else "failed"}
+        "details": {"status": "ready", "model": "loaded" if model else "failed"},
     })
-
-    # Start watcher
     asyncio.create_task(watcher_loop())
 
+
 async def watcher_loop():
-    print("Starting AI Watcher...")
+    print("Starting AI Watcher (JSONL)...")
     while True:
         try:
-            # Recursively find all CSV files
-            files = sorted(DATA_DIR.rglob("*.csv"), key=lambda p: p.stat().st_mtime)
-            
+            files = sorted(DATA_DIR.rglob("*.jsonl"), key=lambda p: p.stat().st_mtime)
             for file_path in files:
                 str_path = str(file_path)
-                current_offset = processed_files.get(str_path, 0)
-                
-                # Check for new content
-                if file_path.stat().st_size > current_offset:
-                    await process_file(file_path, current_offset)
-                    
+                offset = processed_files.get(str_path, 0)
+                if file_path.stat().st_size > offset:
+                    await process_file(file_path, offset)
         except Exception as e:
             print(f"Watcher error: {e}")
-            
         await asyncio.sleep(1)
+
 
 async def process_file(file_path: Path, offset: int):
     str_path = str(file_path)
-    new_offset = offset
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            f.seek(offset)
-            # If reading from start, skip header
-            if offset == 0:
-                header = f.readline()
-                new_offset += len(header.encode('utf-8')) # Approximate
-                
-    except Exception as e:
-        print(f"Error opening {file_path}: {e}")
-        return
-
-    # Let's try a simpler approach for text files: readlines()
     with open(file_path, "r", encoding="utf-8") as f:
         f.seek(offset)
-        
-        # Skip header if it's the very first read of a file
-        if offset == 0:
-            f.readline()
-            
-        reader = csv.DictReader(f, fieldnames=[
-            'FLOW_ID', 'PROTOCOL_MAP', 'L4_SRC_PORT', 'IPV4_SRC_ADDR', 'L4_DST_PORT', 'IPV4_DST_ADDR',
-            'FIRST_SWITCHED', 'FLOW_DURATION_MILLISECONDS', 'LAST_SWITCHED', 'PROTOCOL', 'TCP_FLAGS',
-            'TCP_WIN_MAX_IN', 'TCP_WIN_MAX_OUT', 'TCP_WIN_MIN_IN', 'TCP_WIN_MIN_OUT', 'TCP_WIN_MSS_IN',
-            'TCP_WIN_SCALE_IN', 'TCP_WIN_SCALE_OUT', 'SRC_TOS', 'DST_TOS', 'TOTAL_FLOWS_EXP',
-            'MIN_IP_PKT_LEN', 'MAX_IP_PKT_LEN', 'TOTAL_PKTS_EXP', 'TOTAL_BYTES_EXP', 'IN_BYTES',
-            'IN_PKTS', 'OUT_BYTES', 'OUT_PKTS', 'ANALYSIS_TIMESTAMP', 'ANOMALY', 'ID', 'ALERT'
-        ])
-        
-        for row in reader:
-            if not row['IPV4_SRC_ADDR']: continue # Skip empty lines
-            
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
             try:
-                # Convert CSV row to Flow object
-                flow = Flow(
-                    srcIP=row.get('IPV4_SRC_ADDR', '0.0.0.0'),
-                    dstIP=row.get('IPV4_DST_ADDR', '0.0.0.0'),
-                    srcPort=int(row.get('L4_SRC_PORT', 0)),
-                    dstPort=int(row.get('L4_DST_PORT', 0)),
-                    protocol=int(row.get('PROTOCOL', 0)),
-                    bytes=int(row.get('IN_BYTES', 0)),
-                    packets=int(row.get('IN_PKTS', 0)),
-                    startTime=float(row.get('FIRST_SWITCHED', 0)),
-                    endTime=float(row.get('LAST_SWITCHED', 0)),
-                    tcp_flags=row.get('TCP_FLAGS', ""),
-                    total_flows_exp=int(row.get('TOTAL_FLOWS_EXP', 0)) # <--- Extract feature
-                )
-                
-                # Run inference
+                flow_dict = json.loads(line)
+                flow = Flow(**{k: flow_dict[k] for k in Flow.__fields__ if k in flow_dict})
                 await infer_flow(flow)
-                
             except Exception as e:
                 print(f"Row parsing error: {e}")
-        
-        new_offset = f.tell()
-        
-    processed_files[str_path] = new_offset
+        processed_files[str_path] = f.tell()
 
-async def send_alert(alert_data):
+
+async def send_alert(alert_data: dict):
     uri = "ws://localhost:8000/ws/security"
     try:
         async with websockets.connect(uri) as websocket:
@@ -159,65 +153,130 @@ async def send_alert(alert_data):
     except Exception as e:
         print(f"Failed to send alert: {e}")
 
-def map_flow_to_features(flow: Flow):
-    # Map incoming flow to the features expected by the model
-    
+
+def map_flow_to_features(flow: Flow) -> pd.DataFrame:
+    fwd_pkts  = flow.fwd_packets
+    bwd_pkts  = flow.bwd_packets
+    fwd_bytes = flow.fwd_bytes
+    bwd_bytes = flow.bwd_bytes
+    total_pkts  = fwd_pkts  + bwd_pkts
+    total_bytes = fwd_bytes + bwd_bytes
+    duration_us = max(flow.flow_duration_us, 1)
+    duration_s  = duration_us / 1_000_000
+
+    avg_pkt_size = total_bytes / total_pkts if total_pkts > 0 else 0.0
+    pkt_len_min  = min(flow.fwd_pkt_len_min, flow.bwd_pkt_len_min)
+    pkt_len_max  = max(flow.fwd_pkt_len_max, flow.bwd_pkt_len_max)
+
     data = {
-        'L4_SRC_PORT': flow.srcPort,
-        'L4_DST_PORT': flow.dstPort,
-        'FIRST_SWITCHED': flow.startTime,
-        'FLOW_DURATION_MILLISECONDS': (flow.endTime - flow.startTime) * 1000,
-        'LAST_SWITCHED': flow.endTime,
-        'PROTOCOL': flow.protocol,
-        'TCP_FLAGS': 0, # Assuming 0 if we can't parse string easily here without logic
-        'TCP_WIN_MAX_IN': 0,
-        'TCP_WIN_MAX_OUT': 0,
-        'TCP_WIN_MIN_IN': 0,
-        'TCP_WIN_MIN_OUT': 0,
-        'TCP_WIN_MSS_IN': 0,
-        'TCP_WIN_SCALE_IN': 0,
-        'TCP_WIN_SCALE_OUT': 0,
-        'SRC_TOS': 0,
-        'DST_TOS': 0,
-        'TOTAL_FLOWS_EXP': flow.total_flows_exp, # <--- Added feature
-        'IN_BYTES': flow.bytes,
-        'IN_PKTS': flow.packets,
-        'OUT_BYTES': 0, 
-        'OUT_PKTS': 0,
-        'ANOMALY': 0 
+        "Protocol":               flow.protocol,
+        "Flow Duration":          duration_us,
+        "Total Fwd Packets":      fwd_pkts,
+        "Total Backward Packets": bwd_pkts,
+        "Fwd Packets Length Total": fwd_bytes,
+        "Bwd Packets Length Total": bwd_bytes,
+        "Fwd Packet Length Max":  flow.fwd_pkt_len_max,
+        "Fwd Packet Length Min":  flow.fwd_pkt_len_min,
+        "Fwd Packet Length Mean": flow.fwd_pkt_len_mean,
+        "Fwd Packet Length Std":  flow.fwd_pkt_len_std,
+        "Bwd Packet Length Max":  flow.bwd_pkt_len_max,
+        "Bwd Packet Length Min":  flow.bwd_pkt_len_min,
+        "Bwd Packet Length Mean": flow.bwd_pkt_len_mean,
+        "Bwd Packet Length Std":  flow.bwd_pkt_len_std,
+        "Flow Bytes/s":    total_bytes / duration_s,
+        "Flow Packets/s":  total_pkts  / duration_s,
+        "Flow IAT Mean": 0.0, "Flow IAT Std": 0.0,
+        "Flow IAT Max":  0.0, "Flow IAT Min": 0.0,
+        "Fwd IAT Total": 0.0, "Fwd IAT Mean": 0.0,
+        "Fwd IAT Std":   0.0, "Fwd IAT Max":  0.0, "Fwd IAT Min": 0.0,
+        "Bwd IAT Total": 0.0, "Bwd IAT Mean": 0.0,
+        "Bwd IAT Std":   0.0, "Bwd IAT Max":  0.0, "Bwd IAT Min": 0.0,
+        "Fwd PSH Flags": flow.psh_flag_count,
+        "Bwd PSH Flags": 0,
+        "Fwd URG Flags": flow.urg_flag_count,
+        "Bwd URG Flags": 0,
+        "Fwd Header Length": flow.fwd_header_length,
+        "Bwd Header Length": flow.bwd_header_length,
+        "Fwd Packets/s": fwd_pkts / duration_s,
+        "Bwd Packets/s": bwd_pkts / duration_s,
+        "Packet Length Min":      pkt_len_min,
+        "Packet Length Max":      pkt_len_max,
+        "Packet Length Mean":     avg_pkt_size,
+        "Packet Length Std":      0.0,
+        "Packet Length Variance": 0.0,
+        "FIN Flag Count": flow.fin_flag_count,
+        "SYN Flag Count": flow.syn_flag_count,
+        "RST Flag Count": flow.rst_flag_count,
+        "PSH Flag Count": flow.psh_flag_count,
+        "ACK Flag Count": flow.ack_flag_count,
+        "URG Flag Count": flow.urg_flag_count,
+        "CWE Flag Count": flow.cwe_flag_count,
+        "ECE Flag Count": flow.ece_flag_count,
+        "Down/Up Ratio":        bwd_pkts  / fwd_pkts  if fwd_pkts  > 0 else 0.0,
+        "Avg Packet Size":      avg_pkt_size,
+        "Avg Fwd Segment Size": fwd_bytes / fwd_pkts if fwd_pkts > 0 else 0.0,
+        "Avg Bwd Segment Size": bwd_bytes / bwd_pkts if bwd_pkts > 0 else 0.0,
+        "Fwd Avg Bytes/Bulk":    0, "Fwd Avg Packets/Bulk": 0, "Fwd Avg Bulk Rate": 0,
+        "Bwd Avg Bytes/Bulk":    0, "Bwd Avg Packets/Bulk": 0, "Bwd Avg Bulk Rate": 0,
+        "Subflow Fwd Packets": fwd_pkts,
+        "Subflow Fwd Bytes":   fwd_bytes,
+        "Subflow Bwd Packets": bwd_pkts,
+        "Subflow Bwd Bytes":   bwd_bytes,
+        "Init Fwd Win Bytes":   flow.init_fwd_win_bytes,
+        "Init Bwd Win Bytes":   flow.init_bwd_win_bytes,
+        "Fwd Act Data Packets": flow.fwd_act_data_packets,
+        "Fwd Seg Size Min":     flow.fwd_pkt_len_min,
+        "Active Mean": 0.0, "Active Std": 0.0, "Active Max": 0.0, "Active Min": 0.0,
+        "Idle Mean":   0.0, "Idle Std":   0.0, "Idle Max":   0.0, "Idle Min":   0.0,
     }
-    
-    return pd.DataFrame([data])
+    return pd.DataFrame([data], columns=FEATURE_COLUMNS)
+
 
 @app.post("/infer/flow")
 async def infer_flow(flow: Flow):
     if not model:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    
+
     try:
         features = map_flow_to_features(flow)
-        
-        # Predict
-        prediction = model.predict(features)[0]
-        
-        # If prediction is an attack (not 'None')
-        if prediction != 'None':
+        features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
+
+        total_pkts  = flow.fwd_packets + flow.bwd_packets
+        duration_s  = max(flow.flow_duration_us, 1) / 1_000_000
+        req_rate    = total_pkts / duration_s
+
+        proba      = model.predict_proba(features)[0]
+        p_attack   = float(1.0 - proba[list(model.classes_).index("Benign")] if "Benign" in list(model.classes_) else proba.max())
+        prediction = model.classes_[np.argmax(proba)]
+
+        if prediction != "Benign":
             alert = {
                 "alert": f"Attack Detected: {prediction}",
-                "type": "critical",
-                "details": flow.dict()
+                "type":  "critical",
+                "details": {
+                    **flow.dict(),
+                    "p_attack": p_attack,
+                    "req_rate": req_rate,
+                },
             }
             await send_alert(alert)
-            
-        return {"status": "processed", "prediction": prediction}
-        
+
+        return {
+            "status":     "processed",
+            "prediction": prediction,
+            "p_attack":   p_attack,
+            "req_rate":   req_rate,
+        }
+
     except Exception as e:
         print(f"Inference error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "model_loaded": model is not None}
+
 
 if __name__ == "__main__":
     import uvicorn

