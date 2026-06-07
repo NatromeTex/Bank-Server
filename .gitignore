@@ -58,6 +58,9 @@ data/raw/
 # Trained model artifacts
 models/artifacts/
 models/artifacts_lightgbm/
+models/artifacts_ddos2019/
+models/evaluation/
+models.zip
 
 #dataset
 data/
@@ -65,3 +68,6 @@ data/
 dataset/
 
 *.db
+
+# Generated media/animation output
+media/
