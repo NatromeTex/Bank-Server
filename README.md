@@ -152,7 +152,15 @@ python models/train_pca_svc_ddos2019.py
 
 Point the inference service at the model you want by editing `MODEL_PATH` in `inference/app.py`.
 
-## Usage
+### 2. Set API Key (required for the LLM agent)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Add to `~/.zshrc` for persistence. The system still works without it — only the LLM agent steps are skipped.
+
+### 3. Train the Model
 
 ### Quick Start
 
